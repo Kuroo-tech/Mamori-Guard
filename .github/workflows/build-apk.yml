@@ -32,7 +32,7 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3.2.2
+        uses: android-actions/setup-android@master
 
       - name: Accept Android licenses
         run: yes | sdkmanager --licenses
