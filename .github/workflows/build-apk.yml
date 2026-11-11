@@ -1,121 +1,333 @@
-name: Build APK
+name: Android CI and Release
 
 on:
   push:
     branches:
       - main
-      - 'feature/**'
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  verify:
+    name: Verify and build debug APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version_name: ${{ steps.apk_metadata.outputs.version_name }}
+      version_code: ${{ steps.apk_metadata.outputs.version_code }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # Checkout v7 is the current supported major.
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
-          python-version: '3.11'
+          persist-credentials: false
 
       - name: Check responsive layout profiles
         run: python3 tools/check_layout_profiles.py
 
+      # setup-java v6 provisions the JDK required by AGP 8.6.
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android licenses
-        run: yes | sdkmanager --licenses
-
-      - name: Install Android SDK packages
-        run: |
-          sdkmanager "platform-tools"
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
-
-      - name: Restore stable CI signing key
-        uses: actions/cache@v4
+      # setup-android v4 provisions command-line tools, licenses, and the requested platform.
+      - name: Set up Android SDK and accept licenses
+        uses: android-actions/setup-android@v4
         with:
-          path: ci-signing
-          key: fcmguard-stable-ci-signing-v1
+          cmdline-tools-version: "15859902"
+          accept-android-sdk-licenses: "true"
+          packages: "platforms;android-35"
 
-      - name: Create stable CI signing key if missing
-        run: |
-          mkdir -p ci-signing
-          if [ ! -f ci-signing/fcmguard-debug.keystore ]; then
-            keytool -genkeypair \
-              -keystore ci-signing/fcmguard-debug.keystore \
-              -storepass android \
-              -keypass android \
-              -alias fcmguarddebug \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=FCM Guard Debug,O=ReedGAOOO,C=SG"
-          fi
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      # Gradle setup v6 installs the exact Gradle version; basic uses the open-source cache.
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: '8.7'
+          gradle-version: "8.7"
+          cache-provider: basic
+          cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
-
-      - name: Read version and prepare release APKs
-        id: version
+      # The project hard-codes this debug keystore path. This key is intentionally ephemeral.
+      - name: Create ephemeral debug signing key
         shell: bash
         run: |
-          VERSION=$(sed -n 's/.*versionName "\([^"]*\)".*/\1/p' app/build.gradle | head -n 1)
+          set -euo pipefail
+          mkdir -p ci-signing
+          keytool -genkeypair -noprompt \
+            -keystore ci-signing/fcmguard-debug.keystore \
+            -storetype JKS \
+            -storepass android \
+            -keypass android \
+            -alias fcmguarddebug \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=FCM Guard CI Debug,O=CI"
 
-          if [ -z "$VERSION" ]; then
-            echo "Could not determine versionName" >&2
+      - name: Run tests, lint, and assemble APKs
+        run: >-
+          gradle --no-daemon --stacktrace
+          :app:testDebugUnitTest
+          :app:lintDebug
+          :app:assembleDebug
+          :app:assembleDebugAndroidTest
+
+      - name: Read version from APK metadata
+        id: apk_metadata
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import re
+
+          with open("app/build/outputs/apk/debug/output-metadata.json", encoding="utf-8") as file:
+              metadata = json.load(file)
+
+          elements = metadata.get("elements", [])
+          if len(elements) != 1:
+              raise SystemExit(f"Expected one debug APK, got {len(elements)}")
+
+          version_name = str(elements[0].get("versionName", ""))
+          version_code = str(elements[0].get("versionCode", ""))
+
+          if not re.fullmatch(r"[0-9][A-Za-z0-9._-]*", version_name):
+              raise SystemExit(f"Unsupported versionName for release tags: {version_name!r}")
+          if not version_code.isdigit():
+              raise SystemExit(f"Invalid versionCode: {version_code!r}")
+
+          print(f"version_name={version_name}")
+          print(f"version_code={version_code}")
+          PY
+
+      # upload-artifact v7 stores the build output; no signing key is uploaded.
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: FCMGuard-debug-${{ steps.apk_metadata.outputs.version_name }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-ci-diagnostics-${{ github.run_id }}
+          path: |
+            app/build/reports/
+            app/build/test-results/
+            app/build/outputs/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release_gate:
+    name: Check whether this main commit needs a release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.gate.outputs.publish }}
+      tag: ${{ steps.gate.outputs.tag }}
+      version_name: ${{ needs.verify.outputs.version_name }}
+
+    steps:
+      - name: Decide release from version metadata
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_NAME: ${{ needs.verify.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION_NAME}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${TAG} already exists; bump versionName to publish another release."
+            exit 0
+          fi
+
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Git tag ${TAG} exists without a GitHub Release; recover it manually."
             exit 1
           fi
 
-          TAG="v${VERSION}"
-          APK_NAME="FCMGuard-HyperOS-${TAG}.apk"
-          LATEST_APK_NAME="FCMGuard-HyperOS.apk"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
-          cp app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
-          cp app/build/outputs/apk/debug/app-debug.apk "$LATEST_APK_NAME"
+  release_build:
+    name: Build and sign release APK
+    if: needs.release_gate.outputs.publish == 'true'
+    needs: release_gate
+    runs-on: ubuntu-latest
+    environment: android-release
+    permissions:
+      contents: read
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
-          echo "latest_apk_name=$LATEST_APK_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Upload Actions artifact
-        uses: actions/upload-artifact@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
-          name: FCMGuard-debug-apk
-          path: ${{ steps.version.outputs.apk_name }}
-          retention-days: 30
+          persist-credentials: false
 
-      - name: Publish APKs to GitHub Release
-        if: github.ref == 'refs/heads/main'
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK and accept licenses
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: "15859902"
+          accept-android-sdk-licenses: "true"
+          packages: "platforms;android-35"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.7"
+          cache-provider: basic
+
+      - name: Assemble unsigned release APK
+        run: gradle --no-daemon --stacktrace :app:assembleRelease
+
+      # The existing Gradle release build has no signingConfig. Sign only in this step.
+      - name: Align, sign, and verify release APK
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+          ANDROID_RELEASE_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+          VERSION_NAME: ${{ needs.release_gate.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          : "${ANDROID_RELEASE_KEYSTORE_BASE64:?Missing release keystore secret}"
+          : "${ANDROID_RELEASE_STORE_PASSWORD:?Missing release store-password secret}"
+          : "${ANDROID_RELEASE_KEY_ALIAS:?Missing release alias secret}"
+          : "${ANDROID_RELEASE_KEY_PASSWORD:?Missing release key-password secret}"
+          : "${ANDROID_RELEASE_CERT_SHA256:?Missing expected release certificate fingerprint}"
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          : "${SDK_ROOT:?Android SDK root was not set}"
+
+          BUILD_TOOLS="${SDK_ROOT}/build-tools/34.0.0"
+          ZIPALIGN="${BUILD_TOOLS}/zipalign"
+          APKSIGNER="${BUILD_TOOLS}/apksigner"
+          UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          KEYSTORE="${RUNNER_TEMP}/android-release.jks"
+          ALIGNED_APK="${RUNNER_TEMP}/release-aligned.apk"
+          SIGNED_APK="${RUNNER_TEMP}/release-signed.apk"
+
+          test -x "$ZIPALIGN"
+          test -x "$APKSIGNER"
+          test -f "$UNSIGNED_APK"
+
+          trap 'rm -f "$KEYSTORE" "$ALIGNED_APK" "$SIGNED_APK"' EXIT
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+
+          "$ZIPALIGN" -f -v 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+          "$APKSIGNER" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias "$ANDROID_RELEASE_KEY_ALIAS" \
+            --ks-pass env:ANDROID_RELEASE_STORE_PASSWORD \
+            --key-pass env:ANDROID_RELEASE_KEY_PASSWORD \
+            --out "$SIGNED_APK" \
+            "$ALIGNED_APK"
+
+          VERIFY_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$SIGNED_APK")"
+          ACTUAL_CERT_SHA256="$(printf '%s\n' "$VERIFY_OUTPUT" |
+            awk -F': ' '/Signer #1 certificate SHA-256 digest:/ {
+              gsub(/:/, "", $2); print tolower($2); exit
+            }')"
+          EXPECTED_CERT_SHA256="$(printf '%s' "$ANDROID_RELEASE_CERT_SHA256" |
+            tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+
+          if [[ -z "$ACTUAL_CERT_SHA256" || "$ACTUAL_CERT_SHA256" != "$EXPECTED_CERT_SHA256" ]]; then
+            echo "::error::Release APK certificate fingerprint did not match the configured expected fingerprint."
+            exit 1
+          fi
+
+          mkdir -p dist
+          cp "$SIGNED_APK" "dist/FCMGuard-HyperOS-v${VERSION_NAME}.apk"
+          cp "$SIGNED_APK" "dist/FCMGuard-HyperOS.apk"
+
+      - name: Upload signed release APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: FCMGuard-release-${{ needs.release_gate.outputs.version_name }}
+          path: |
+            dist/FCMGuard-HyperOS-v${{ needs.release_gate.outputs.version_name }}.apk
+            dist/FCMGuard-HyperOS.apk
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload release diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-release-diagnostics-${{ github.run_id }}
+          path: |
+            app/build/reports/
+            app/build/outputs/logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Publish versioned GitHub Release
+    if: needs.release_gate.outputs.publish == 'true'
+    needs:
+      - release_gate
+      - release_build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: android-release-${{ needs.release_gate.outputs.tag }}
+      cancel-in-progress: false
+
+    steps:
+      # download-artifact v8 transfers the signed assets from the isolated build job.
+      - name: Download signed release APKs
+        uses: actions/download-artifact@v8
+        with:
+          name: FCMGuard-release-${{ needs.release_gate.outputs.version_name }}
+          path: release-assets
+
+      - name: Create release without overwriting existing assets
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
-          APK_NAME: ${{ steps.version.outputs.apk_name }}
-          LATEST_APK_NAME: ${{ steps.version.outputs.latest_apk_name }}
+          TAG: ${{ needs.release_gate.outputs.tag }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK_NAME" "$LATEST_APK_NAME" --clobber
-          else
-            gh release create "$TAG" "$APK_NAME" "$LATEST_APK_NAME" \
-              --target "$GITHUB_SHA" \
-              --title "FCM Guard v${VERSION}" \
-              --notes "FCM Guard v${VERSION} for China-ROM HyperOS 3. Download the APK below and install it directly on your phone."
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::${TAG} was published by another run; existing assets were left untouched."
+            exit 0
           fi
+
+          gh release create "$TAG" \
+            "release-assets/FCMGuard-HyperOS-v${{ needs.release_gate.outputs.version_name }}.apk" \
+            "release-assets/FCMGuard-HyperOS.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "FCM Guard ${TAG}" \
+            --generate-notes
