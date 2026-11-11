@@ -2,6 +2,7 @@ package com.reed.fcmguard;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Build;
 import android.provider.Settings;
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -77,7 +78,7 @@ public final class SettingsGuard {
      * important because the common background path should be practically idle.
      */
     public static synchronized Result repair(Context context) {
-        if (!Settings.System.canWrite(context)) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(context)) {
             return new Result(false, false, read(context), context.getString(R.string.permission_missing));
         }
 

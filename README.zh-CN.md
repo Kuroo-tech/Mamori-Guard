@@ -20,7 +20,7 @@
 
 ## 亮点
 
-- **免 Root / Shizuku** — 仅使用用户可手动授权的 **修改系统设置** 权限，不依赖 Root、持续 ADB、无障碍、VPN、悬浮窗或设备管理员。
+- **FCM 保护无需 Root / Shizuku** — 仅使用用户可手动授权的 **修改系统设置** 权限，不依赖 Root、持续 ADB、无障碍、VPN、悬浮窗或设备管理员。
 - **对金融 App 更友好** — 整体保持低权限设计，避免引入更容易触发安全敏感 App 风控的高权限方案。
 - **低后台耗电** — 主要采用精确事件监听，30 分钟兜底检查仅在进程内运行，不会主动唤醒休眠手机。
 - **只在必要时重连** — 仅在真正执行白名单修复后，或用户手动点击时发送 FCM/MCS 重连请求。
@@ -28,6 +28,8 @@
 - **FCM App 助手** — 扫描可能依赖 Firebase/GCM 的 App；当 HyperOS 允许读取厂商 AppOps 时，会只读显示自启动状态，并在用户从系统设置返回后自动复查。
 - **原生深色模式** — 支持 跟随系统 / 浅色 / 深色，默认 **跟随系统**。
 - **10 种主流语言** — 英语、简体中文、繁体中文、法语、日语、韩语、西班牙语、葡萄牙语、德语、俄语，接入 Android 原生应用语言机制。
+- **本地变更历史与冲突安全撤销** — 持久记录成功的设置和 App 语言变更；仅当当前值仍等于记录值时才执行撤销。
+- **可选的单 App 语言管理** — Android 13+ 可选用 Shizuku 或 Sui 管理其他 App 的语言，不会修改系统全局语言；此功能与 FCM 保护相互独立。
 - **小屏适配** — 响应式布局自动检查 320–480dp 宽度，包含 Xiaomi 17 级别的 393dp profile。
 
 ## 快速使用
@@ -143,6 +145,14 @@ FCM Guard 保护的是 **Google Play 服务 / FCM 传输层**，但不会绕过 
 - compact 与较大宽度分别使用响应式资源参数。
 - CI 自动检查 320、360、393、411、430、480dp 宽度，包括 Hero / Status overlap 与同心圆角几何关系。
 
+## 单 App 语言与变更历史
+
+**App 语言** 页面是可选功能，仅适用于 Android 13 及以上。它通过 Shizuku API 13.1.5 的隔离 UserService（同样兼容 Sui）调用 Android locale-manager shell 接口，并在读回验证后才报告成功。只有主动使用此功能时才需要授予 Shizuku 权限；常规 FCM 保护不使用也不需要 Shizuku。
+
+语言管理器列出有启动器入口的用户 App，支持搜索、多选、批量预览、部分成功报告和重置为 **系统默认**；默认排除系统 App。设置 `vi-VN` 不会为 App 添加越南语翻译，目标 App 必须自带对应资源。通过无线调试启动的 Shizuku 可能需要在重启后再次启动。
+
+**历史记录** 页面会在本机保存成功且实际改变状态的操作，以及单 App 批量语言操作的失败结果。撤销前需要确认，并会比较当前值与历史记录；若发生冲突则跳过，不会覆盖较新的状态。批量撤销只处理已记录并验证成功的项目。本地历史不会同步到其他设备。
+
 ## 权限与隐私
 
 FCM Guard 使用 `WRITE_SETTINGS`、`RECEIVE_BOOT_COMPLETED`、前台服务 / 通知支持，以及针对 FCM/GCM handler、Google Play 服务和小米安全中心的窄范围 package visibility。
@@ -167,6 +177,8 @@ FCM Guard 是独立实现，设计重点是无需 Shizuku / Root、权限尽量�
 ## 构建
 
 GitHub Actions 会自动检查响应式布局并构建签名后的 debug APK。push 到 `main` 时还会自动创建 / 更新对应版本的 GitHub Release；feature branch 可先进行构建验证，再合并发布。
+
+本地验证命令：`gradle :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest`。运行 instrumentation tests 还需要连接 Android 设备或模拟器。
 
 手机用户建议直接使用固定最新版地址：
 

@@ -38,7 +38,8 @@ import android.widget.Toast;
 
 import java.util.List;
 
-public class MainActivity extends Activity {
+// Legacy XML activity retained as a fallback during the Kotlin + Compose migration.
+class MainActivityLegacy extends Activity {
     private static final String[] LANGUAGE_CODES = {
             "system", "en", "zh-CN", "zh-TW", "fr", "ja", "ko", "es", "pt", "de", "ru"
     };
@@ -79,8 +80,8 @@ public class MainActivity extends Activity {
     private final Runnable notificationAccessFollowUp = new Runnable() {
         @Override public void run() {
             if (!notificationAccessPending || !hasWindowFocus()) return;
-            if (SettingsGuard.usePersistentNotification(MainActivity.this) &&
-                    !GuardService.canShowPersistentNotification(MainActivity.this)) {
+            if (SettingsGuard.usePersistentNotification(MainActivityLegacy.this) &&
+                    !GuardService.canShowPersistentNotification(MainActivityLegacy.this)) {
                 notificationAccessPending = false;
                 openNotificationSettings();
             } else {
@@ -278,7 +279,7 @@ public class MainActivity extends Activity {
 
             if (checked) {
                 SettingsGuard.saveConfig(this, keyEdit.getText().toString(), itemEdit.getText().toString());
-                if (!Settings.System.canWrite(this)) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(this)) {
                     SettingsGuard.setProtectionEnabled(this, false);
                     suppressSwitchCallbacks = true;
                     protectionSwitch.setChecked(false);
@@ -615,7 +616,7 @@ public class MainActivity extends Activity {
     }
 
     private void refreshStatus(String firstLine) {
-        boolean canWrite = Settings.System.canWrite(this);
+        boolean canWrite = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.System.canWrite(this);
         boolean enabled = SettingsGuard.isProtectionEnabled(this);
         boolean notification = SettingsGuard.usePersistentNotification(this);
         String current = SettingsGuard.read(this);

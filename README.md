@@ -20,7 +20,7 @@
 
 ## Highlights
 
-- **No root or Shizuku** — uses the user-grantable **Modify system settings** permission instead of root, persistent ADB, Accessibility, VPN, overlay, or device-admin privileges.
+- **No root or Shizuku for FCM protection** — uses the user-grantable **Modify system settings** permission instead of root, persistent ADB, Accessibility, VPN, overlay, or device-admin privileges.
 - **Finance-app friendly** — keeps the implementation deliberately low-privilege for better compatibility with security-sensitive apps.
 - **Low background power** — exact event-driven monitoring is the main path; the 30-minute fallback is in-process and does not deliberately wake a sleeping phone.
 - **Reconnects only when needed** — FCM/MCS reconnect broadcasts are sent only after a real whitelist repair or a manual request.
@@ -28,6 +28,8 @@
 - **FCM app assistant** — scans likely Firebase/GCM clients and, when HyperOS exposes the vendor AppOps state, shows read-only Autostart status with automatic re-check after returning from system settings.
 - **Native dark mode** — System / Light / Dark, with **System** as the default.
 - **10-language UI** — English, Simplified Chinese, Traditional Chinese, French, Japanese, Korean, Spanish, Portuguese, German, and Russian through Android's native per-app language mechanism.
+- **Persistent change history with conflict-safe Undo** — stores successful settings and locale changes locally; Undo only applies when the current value still matches the recorded value.
+- **Optional app-specific locale manager** — on Android 13+, Shizuku or Sui can set/read per-app locales without changing the system language. This optional feature is separate from FCM protection.
 - **Compact-phone ready** — responsive layout checks cover 320–480dp widths, including a Xiaomi 17-class 393dp profile.
 
 ## Quick setup
@@ -140,6 +142,14 @@ Also enable **Autostart** for the affected app when the ROM exposes that option.
 - Compact and large-width resource profiles.
 - CI geometry checks for 320, 360, 393, 411, 430, and 480dp widths.
 
+## App-specific locales and change history
+
+The **App languages** screen is optional and available on Android 13 or later. It uses Shizuku API 13.1.5's isolated user-service process (also compatible with Sui) to invoke Android's locale-manager shell interface, then reads each value back before reporting success. Grant Shizuku permission only if you choose to use this feature; normal FCM protection does not use or require Shizuku.
+
+The locale manager lists launcher-visible user apps, supports search and multi-select, previews batch size, reports partial results, and can reset selected apps to **System default**. It excludes system applications by default. Setting `vi-VN` does not add Vietnamese translations to an app; the app must include matching resources. Shizuku started through wireless debugging may need to be restarted after reboot.
+
+The **History** screen persists successful, non-no-op changes and per-app batch failure outcomes on-device. Undo asks for confirmation, compares the current value with the recorded after-value, and refuses to overwrite a conflict. Batch Undo applies only to recorded, verified changes and skips conflicts. The history database is local to the app and is not synced.
+
 ## Permissions and privacy
 
 FCM Guard uses `WRITE_SETTINGS`, `RECEIVE_BOOT_COMPLETED`, foreground-service/notification support, and narrow package visibility for FCM/GCM handlers, Google Play services, and Xiaomi Security Center.
@@ -164,6 +174,8 @@ FCM Guard is an independent implementation focused on no Shizuku/root dependency
 ## Build
 
 GitHub Actions checks responsive layout profiles and builds a signed debug APK. Pushes to `main` publish/update the versioned GitHub Release; feature branches can be validated before release.
+
+Local verification uses `gradle :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest`. Instrumentation tests require an Android device/emulator to execute.
 
 For normal phone installation, use:
 
